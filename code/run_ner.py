@@ -4,15 +4,18 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from transformers import HfArgumentParser
+
+sys.path.append('code')
 
 import flair
 from flair import set_seed
 from flair.embeddings import TransformerWordEmbeddings
 from flair.models import SequenceTagger
-from code.custom_trainer import LiteTrainer
+from custom_trainer import LiteTrainer
 
 logger = logging.getLogger("flair")
 logger.setLevel(level="INFO")
@@ -45,15 +48,15 @@ class TrainingArguments:
     device: str = field(default="cuda", metadata={"help": "CUDA device string."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for optimizer."})
     embeddings_storage_mode: str = field(default="none", metadata={"help": "Defines embedding storage method."})
-    accelerator: str = field(default=None, metadata={"help": "Choose the hardware to run on e.g. 'gpu'."})
-    strategy: str = field(
+    accelerator: Optional[str] = field(default=None, metadata={"help": "Choose the hardware to run on e.g. 'gpu'."})
+    strategy: Optional[str] = field(
         default=None, 
         metadata={"help": "Strategy for how to run across multiple devices e.g. 'ddp', 'deepspeed'."})
-    devices: Union[List[int], str, int, None] = field(
+    devices: Optional[int] = field(
         default=None, 
         metadata={"help": "Number of devices to train on (int), which GPUs to train on (list or str)"})
-    num_nodes: int = field(default=1, metadata={"help": "Number of GPU nodes for distributed training."})
-    precision: Union[int, str] = field(default=32, metadata={"help": "Choose training precision to use."})         
+    num_nodes: Optional[int] = field(default=1, metadata={"help": "Number of GPU nodes for distributed training."})
+    precision: Optional[int] = field(default=32, metadata={"help": "Choose training precision to use."})         
 
 @dataclass
 class FlertArguments:
@@ -143,7 +146,7 @@ def main():
         reproject_embeddings=False,
     )
     
-    trainer = Lite(
+    trainer = LiteTrainer(
         accelerator=training_args.accelerator,
         strategy=training_args.strategy,
         devices=training_args.devices,

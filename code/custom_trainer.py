@@ -10,19 +10,10 @@ from inspect import signature
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
 
-# metallo - start
-import torch
-from pytorch_lightning.lite import LightningLite
-from torch import cuda, nn
-from torch.optim import AdamW, Optimizer
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.optim.sgd import SGD
-# from torch.utils.data import DataLoader, Dataset
-# metallo - end
-
 import torch
 from torch.optim.sgd import SGD
 from torch.utils.data.dataset import ConcatDataset
+from pytorch_lightning.lite import LightningLite
 
 try:
     from apex import amp
@@ -36,7 +27,7 @@ from torch.optim.lr_scheduler import OneCycleLR  # type: ignore
 import flair
 import flair.nn
 from flair.data import Corpus, Dictionary, MultiCorpus, _len_dataset
-from flair.datasets import DataLoader # metallo
+from flair.datasets import DataLoader
 from flair.optim import ExpAnnealLR, LinearSchedulerWithWarmup
 from flair.training_utils import (
     AnnealOnPlateau,
@@ -65,7 +56,7 @@ class LiteTrainer(LightningLite):
         train_with_test: bool = False,
         monitor_train: bool = False,
         monitor_test: bool = False,
-        main_evaluation_metric: Tuple[str, str] = ("micro avg", "f1-score"),
+        main_evaluation_metric: Tuple[str, str] = ("micro avg", "f1-score"), #("recall", "precision"),
         scheduler=AnnealOnPlateau,
         anneal_factor: float = 0.5,
         patience: int = 3,
@@ -86,8 +77,6 @@ class LiteTrainer(LightningLite):
         write_weights: bool = False,
         num_workers: Optional[int] = None,
         sampler=None,
-        use_amp: bool = False,
-        amp_opt_level: str = "O1",
         eval_on_train_fraction: float = 0.0,
         eval_on_train_shuffle: bool = False,
         save_model_each_k_epochs: int = 0,
@@ -178,10 +167,10 @@ class LiteTrainer(LightningLite):
         # remember all parameters used in run() call
         local_variables = locals()
         training_parameters = {}
-#         print(f'local_variables: {local_variables[parameter]}')
-#         for parameter in signature(self.run).parameters:
-#             training_parameters[parameter] = local_variables[parameter]
-#         model_card["training_parameters"] = training_parameters
+        for parameter in signature(self.run).parameters:
+            if parameter != 'args':
+                training_parameters[parameter] = local_variables[parameter]
+        model_card["training_parameters"] = training_parameters
 
         # add model card to model
         self.model.model_card = model_card
@@ -201,16 +190,6 @@ class LiteTrainer(LightningLite):
                 log_line(log)
                 use_tensorboard = False
                 pass
-
-        if use_amp:
-            if sys.version_info < (3, 0):
-                raise RuntimeError("Apex currently only supports Python 3. Aborting.")
-            if amp is None:
-                raise RuntimeError(
-                    "Failed to import apex. Please install apex from "
-                    "https://www.github.com/nvidia/apex "
-                    "to enable mixed-precision training."
-                )
 
         if not eval_batch_size:
             eval_batch_size = mini_batch_size
@@ -265,19 +244,13 @@ class LiteTrainer(LightningLite):
 
         if use_swa:
             import torchcontrib
-
             optimizer = torchcontrib.optim.SWA(optimizer, swa_start=10, swa_freq=5, swa_lr=learning_rate)
 
         # from here on, use list of learning rates
         current_learning_rate: List = [group["lr"] for group in optimizer.param_groups]
 
-        if use_amp:
-            self.model, optimizer = amp.initialize(self.model, optimizer, opt_level=amp_opt_level)
-
         optimizer = cast(torch.optim.Optimizer, optimizer)
-        
-        # metallo
-        model, optimizer = self.setup(model, optimizer)
+        self.model, optimizer = self.setup(self.model, optimizer) # metallo
 
         # load existing optimizer state dictionary if it exists
         if optimizer_state_dict:
@@ -328,8 +301,8 @@ class LiteTrainer(LightningLite):
             scheduler.load_state_dict(scheduler_state_dict)
 
         # update optimizer and scheduler in model card
-#         model_card["training_parameters"]["optimizer"] = optimizer
-#         model_card["training_parameters"]["scheduler"] = scheduler
+        model_card["training_parameters"]["optimizer"] = optimizer
+        model_card["training_parameters"]["scheduler"] = scheduler
 
         if isinstance(scheduler, OneCycleLR) and batch_growth_annealing:
             raise ValueError("Batch growth with OneCycle policy is not implemented.")
@@ -403,7 +376,7 @@ class LiteTrainer(LightningLite):
                 log_line(log)
 
                 # update epoch in model card
-#                 model_card["training_parameters"]["epoch"] = epoch
+                model_card["training_parameters"]["epoch"] = epoch
 
                 if anneal_with_prestarts:
                     last_epoch_model_state_dict = copy.deepcopy(self.model.state_dict())
@@ -460,8 +433,7 @@ class LiteTrainer(LightningLite):
                     sampler=sampler,
                 )
                 
-                # metallo
-                batch_loader = self.setup_dataloaders(batch_loader)
+                batch_loader = self.setup_dataloaders(batch_loader) # metallo
 
                 self.model.train()
 
@@ -492,19 +464,15 @@ class LiteTrainer(LightningLite):
                     for batch_step in batch_steps:
 
                         # forward pass
-                        loss = self.model.forward_loss(batch_step)
+                        loss = model.forward_loss(batch_step)
+#                         loss = self.model(batch_step) # metallo
 
                         if isinstance(loss, tuple):
                             average_over += loss[1]
                             loss = loss[0]
 
                         # Backward
-                        if use_amp:
-                            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                                scaled_loss.backward()
-                        else:
-                            self.backward(loss)
-#                             loss.backward() metallo
+                        self.backward(loss) # metallo
                         train_loss += loss.item()
 
                         # identify dynamic embeddings (always deleted) on first sentence
@@ -854,26 +822,25 @@ class LiteTrainer(LightningLite):
 
     def resume(
         self,
-        model: Model,
+        model: flair.nn.Model,
         **trainer_args,
     ):
 
         assert model.model_card is not None
         self.model = model
         # recover all arguments that were used to train this model
-#         args_used_to_train_model = model.model_card["training_parameters"]
-
+        args_used_to_train_model = model.model_card["training_parameters"]
         # you can overwrite params with your own
-#         for param in trainer_args:
-#             args_used_to_train_model[param] = trainer_args[param]
-#             if param == "optimizer" and "optimizer_state_dict" in args_used_to_train_model:
-#                 del args_used_to_train_model["optimizer_state_dict"]
-#             if param == "scheduler" and "scheduler_state_dict" in args_used_to_train_model:
-#                 del args_used_to_train_model["scheduler_state_dict"]
+        for param in trainer_args:
+            args_used_to_train_model[param] = trainer_args[param]
+            if param == "optimizer" and "optimizer_state_dict" in args_used_to_train_model:
+                del args_used_to_train_model["optimizer_state_dict"]
+            if param == "scheduler" and "scheduler_state_dict" in args_used_to_train_model:
+                del args_used_to_train_model["scheduler_state_dict"]
 
         # surface nested arguments
-#         kwargs = args_used_to_train_model["kwargs"]
-#         del args_used_to_train_model["kwargs"]
+        kwargs = args_used_to_train_model["kwargs"]
+        del args_used_to_train_model["kwargs"]
 
         # resume training with these parameters
         self.run(**args_used_to_train_model, **kwargs)
@@ -981,86 +948,92 @@ class LiteTrainer(LightningLite):
 
         return final_score
 
-#     def find_learning_rate(
-#         self,
-#         base_path: Union[Path, str],
-#         optimizer,
-#         file_name: str = "learning_rate.tsv",
-#         start_learning_rate: float = 1e-7,
-#         end_learning_rate: float = 10,
-#         iterations: int = 100,
-#         mini_batch_size: int = 32,
-#         stop_early: bool = True,
-#         smoothing_factor: float = 0.98,
-#         **kwargs,
-#     ) -> Path:
-#         best_loss = None
-#         moving_avg_loss = 0.0
+    def find_learning_rate(
+        self,
+        base_path: Union[Path, str],
+        optimizer,
+        file_name: str = "learning_rate.tsv",
+        start_learning_rate: float = 1e-7,
+        end_learning_rate: float = 10,
+        iterations: int = 100,
+        mini_batch_size: int = 32,
+        stop_early: bool = True,
+        smoothing_factor: float = 0.98,
+        **kwargs,
+    ) -> Path:
+        best_loss = None
+        moving_avg_loss = 0.0
 
-#         # cast string to Path
-#         if type(base_path) is str:
-#             base_path = Path(base_path)
-#         learning_rate_tsv = init_output_file(base_path, file_name)
+        # cast string to Path
+        if type(base_path) is str:
+            base_path = Path(base_path)
+        learning_rate_tsv = init_output_file(base_path, file_name)
 
-#         with open(learning_rate_tsv, "a") as f:
-#             f.write("ITERATION\tTIMESTAMP\tLEARNING_RATE\tTRAIN_LOSS\n")
+        with open(learning_rate_tsv, "a") as f:
+            f.write("ITERATION\tTIMESTAMP\tLEARNING_RATE\tTRAIN_LOSS\n")
 
-#         optimizer = optimizer(self.model.parameters(), lr=start_learning_rate, **kwargs)
+        optimizer = optimizer(self.model.parameters(), lr=start_learning_rate, **kwargs)
 
-#         train_data = self.corpus.train
+        train_data = self.corpus.train
 
-#         scheduler = ExpAnnealLR(optimizer, end_learning_rate, iterations)
+        scheduler = ExpAnnealLR(optimizer, end_learning_rate, iterations)
 
-#         model_state = self.model.state_dict()
-#         self.model.train()
+        model_state = self.model.state_dict()
+        
+        self.model, optimizer = self.setup(self.model, optimizer) # metallo
+        self.model.train()
 
-#         step = 0
-#         while step < iterations:
-#             batch_loader = DataLoader(train_data, batch_size=mini_batch_size, shuffle=True)
-#             for batch in batch_loader:
-#                 step += 1
+        step = 0
+        while step < iterations:
+            batch_loader = DataLoader(train_data, batch_size=mini_batch_size, shuffle=True)
+            batch_loader = self.setup_dataloaders(batch_loader) # metallo
+            
+            for batch in batch_loader:
+                step += 1
 
-#                 # forward pass
+                # forward pass
 #                 loss = self.model.forward_loss(batch)
-#                 if isinstance(loss, tuple):
-#                     loss = loss[0]
+                loss = self.model(batch)
 
-#                 # update optimizer and scheduler
-#                 optimizer.zero_grad()
-#                 loss.backward()
-#                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
-#                 optimizer.step()
-#                 scheduler.step()
+                if isinstance(loss, tuple):
+                    loss = loss[0]
 
-#                 learning_rate = scheduler.get_lr()[0]
+                # update optimizer and scheduler
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+                optimizer.step()
+                scheduler.step()
 
-#                 loss_item = loss.item()
-#                 if step == 1:
-#                     best_loss = loss_item
-#                 else:
-#                     if smoothing_factor > 0:
-#                         moving_avg_loss = smoothing_factor * moving_avg_loss + (1 - smoothing_factor) * loss_item
-#                         loss_item = moving_avg_loss / (1 - smoothing_factor ** (step + 1))
-#                     if loss_item < best_loss:  # type: ignore
-#                         best_loss = loss  # type: ignore
+                learning_rate = scheduler.get_lr()[0]
 
-#                 if step > iterations:
-#                     break
+                loss_item = loss.item()
+                if step == 1:
+                    best_loss = loss_item
+                else:
+                    if smoothing_factor > 0:
+                        moving_avg_loss = smoothing_factor * moving_avg_loss + (1 - smoothing_factor) * loss_item
+                        loss_item = moving_avg_loss / (1 - smoothing_factor ** (step + 1))
+                    if loss_item < best_loss:  # type: ignore
+                        best_loss = loss  # type: ignore
 
-#                 if stop_early and (loss_item > 4 * best_loss or torch.isnan(loss)):  # type: ignore
-#                     log_line(log)
-#                     log.info("loss diverged - stopping early!")
-#                     step = iterations
-#                     break
+                if step > iterations:
+                    break
 
-#                 with open(str(learning_rate_tsv), "a") as f:
-#                     f.write(f"{step}\t{datetime.datetime.now():%H:%M:%S}\t{learning_rate}\t{loss_item}\n")
+                if stop_early and (loss_item > 4 * best_loss or torch.isnan(loss)):  # type: ignore
+                    log_line(log)
+                    log.info("loss diverged - stopping early!")
+                    step = iterations
+                    break
 
-#             self.model.load_state_dict(model_state)
+                with open(str(learning_rate_tsv), "a") as f:
+                    f.write(f"{step}\t{datetime.datetime.now():%H:%M:%S}\t{learning_rate}\t{loss_item}\n")
+
+            self.model.load_state_dict(model_state)
 #             self.model.to(flair.device)
 
-#         log_line(log)
-#         log.info(f"learning rate finder finished - plot {learning_rate_tsv}")
-#         log_line(log)
+        log_line(log)
+        log.info(f"learning rate finder finished - plot {learning_rate_tsv}")
+        log_line(log)
 
-#         return Path(learning_rate_tsv)
+        return Path(learning_rate_tsv)
