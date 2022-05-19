@@ -1,1 +1,3 @@
-# use-lightninglite-with-flairnlp
+# Distributed training with LightningLite, SageMaker, and Flair
+
+work in progress...

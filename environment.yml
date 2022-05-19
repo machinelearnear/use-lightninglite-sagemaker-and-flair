@@ -1,0 +1,48 @@
+# To use:
+#   $ conda env create -f environment.yml
+#   $ conda activate <name>
+name: machinelearnear-lightninglite-sagemaker-flair
+dependencies:
+  - python=3.9
+  - pip
+  - nb_conda_kernels
+  - ipykernel
+  - ipywidgets
+  - gh
+  - pip:
+    - gradio
+    - boto3
+    - awscli
+    - sagemaker
+    - sagemaker-experiments
+    - torch
+    - flair
+    - sacremoses
+    - pytorch_lightning
+    - deepspeed
+    - python-dateutil
+    - gensim
+    - tqdm
+    - segtok
+    - matplotlib
+    - mpld3
+    - scikit-learn
+    - sqlitedict
+    - deprecated
+    - hyperopt
+    - transformers
+    - bpemb
+    - regex
+    - tabulate
+    - langdetect
+    - lxml
+    - ftfy
+    - sentencepiece
+    - konoha<5.0.0,>=4.0.0
+    - janome
+    - gdown
+    - huggingface-hub
+    - conllu
+    - more-itertools
+    - wikipedia-api
+    - pptree
