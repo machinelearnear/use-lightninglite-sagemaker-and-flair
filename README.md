@@ -1,4 +1,16 @@
-# Distributed training with LightningLite, SageMaker, and Flair
+# Multi-gpu training with LightningLite, SageMaker, and Flair
+
+This repo is a work in progress that shows you a step by a step process to do distributed training with the `flair` library especially for NER tasks.
+
+## Getting started
+- [Getting Started with Tensor Parallelism using the SageMaker Model Parallelism Library
+](https://github.com/aws/amazon-sagemaker-examples/blob/main/training/distributed_training/pytorch/model_parallel/gpt-j/11_train_gptj_smp_tensor_parallel_notebook.ipynb)
+- [Flair Repo: "LightningLite Integration with Flair"](https://github.com/flairNLP/flair/pull/2700)
+- [PyTorch LightningLite Docs](https://pytorch-lightning.readthedocs.io/en/stable/starter/lightning_lite.html)
+- [Tutorial: "Named-Entity-Recognition-on-HuggingFace"](https://wandb.ai/biased-ai/Named-Entity%20Recognition%20on%20HuggingFace/reports/Named-Entity-Recognition-on-HuggingFace--Vmlldzo3NTk4NjY)
+- [Tutorial: "Named Entity Recognition with Transformers"](https://chriskhanhtran.github.io/posts/named-entity-recognition-with-transformers/)
+- [Tutorial: "Token classification in HuggingFace"](https://github.com/huggingface/transformers/tree/v4.17.0/examples/pytorch/token-classification)
+- [Tutorial: "Training Custom NER Model Using Flair"](https://medium.com/thecyphy/training-custom-ner-model-using-flair-df1f9ea9c762)
 
 ## What's the problem?
 
