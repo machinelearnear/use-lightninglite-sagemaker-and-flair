@@ -3,7 +3,7 @@ import datetime
 import inspect
 import logging
 import os
-import sys
+# import sys
 import time
 import warnings
 from inspect import signature
@@ -11,14 +11,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
 
 import torch
+from pytorch_lightning.lite import LightningLite # changed
+from torch import cuda, nn # changed
+from torch.optim import AdamW, Optimizer
 from torch.optim.sgd import SGD
 from torch.utils.data.dataset import ConcatDataset
-from pytorch_lightning.lite import LightningLite
 
-try:
-    from apex import amp
-except ImportError:
-    amp = None
+from flair.nn import Model
+
+# try:
+#     from apex import amp
+# except ImportError:
+#     amp = None
 
 import random
 
@@ -41,11 +45,67 @@ from flair.training_utils import (
 
 log = logging.getLogger("flair")
 
+
 class LiteTrainer(LightningLite):
-    def run(
+    def train(
         self,
         model: flair.nn.Model,
         corpus: Corpus,
+        base_path: Union[Path, str],
+        optimizer: Type[Optimizer] = SGD,
+        optimizer_state: dict = None,
+        learning_rate: float = 0.1,
+        mini_batch_size: int = 32,
+        anneal_factor: float = 0.5,
+        patience: int = 3,
+        initial_epoch: int = 0,
+        max_epochs: int = 100,
+        checkpoint: bool = False,
+        num_workers: Optional[int] = None,
+        **kwargs,
+    ):
+        """
+        :param model: The model that you want to train. The model should inherit from flair.nn.Model  # noqa: E501
+        :param corpus: The dataset used to train the model, should be of type Corpus
+        """
+        # TODO: check if model & optimzer should be instance attribute?
+        self.model: Union[LightningLite._LiteModule, Model] = model
+        self.model_original = model
+        self.optimizer: Type[Optimizer] = optimizer
+        self.corpus: Corpus = corpus
+        self.label_dictionary: Dictionary = model.label_dictionary
+        self.loss_function = torch.nn.CrossEntropyLoss(weight=None, reduction="sum") # changed
+        self.log_interval = 100
+        self.optimizer_state = optimizer_state
+        self.run(
+            base_path=base_path,
+            learning_rate=learning_rate,
+            mini_batch_size=mini_batch_size,
+            anneal_factor=anneal_factor,
+            patience=patience,
+            initial_epoch=initial_epoch,
+            max_epochs=max_epochs,
+            checkpoint=checkpoint,
+            num_workers=num_workers,
+            **kwargs,
+        )
+    
+    @staticmethod
+    def check_for_and_delete_previous_best_models(base_path):
+        all_best_model_names = [filename for filename in os.listdir(base_path) if filename.startswith("best-model")]
+        if len(all_best_model_names) != 0:
+            warnings.warn(
+                "There should be no best model saved at epoch 1 except there "
+                "is a model from previous trainings"
+                " in your training folder. All previous best models will be deleted."
+            )
+        for single_model in all_best_model_names:
+            previous_best_path = os.path.join(base_path, single_model)
+            if os.path.exists(previous_best_path):
+                os.remove(previous_best_path)
+
+    def run(
+        self,
         base_path: Union[Path, str],
         learning_rate: float = 0.1,
         mini_batch_size: int = 32,
@@ -56,7 +116,7 @@ class LiteTrainer(LightningLite):
         train_with_test: bool = False,
         monitor_train: bool = False,
         monitor_test: bool = False,
-        main_evaluation_metric: Tuple[str, str] = ("micro avg", "f1-score"), #("recall", "precision"),
+        main_evaluation_metric: Tuple[str, str] = ("micro avg", "f1-score"),
         scheduler=AnnealOnPlateau,
         anneal_factor: float = 0.5,
         patience: int = 3,
@@ -77,6 +137,8 @@ class LiteTrainer(LightningLite):
         write_weights: bool = False,
         num_workers: Optional[int] = None,
         sampler=None,
+#         use_amp: bool = False,
+#         amp_opt_level: str = "O1",
         eval_on_train_fraction: float = 0.0,
         eval_on_train_shuffle: bool = False,
         save_model_each_k_epochs: int = 0,
@@ -87,7 +149,8 @@ class LiteTrainer(LightningLite):
         exclude_labels: List[str] = [],
         create_file_logs: bool = True,
         create_loss_file: bool = True,
-        epoch: int = 0,
+#         epoch: int = 0,
+        initial_epoch: int = 0, # changed
         use_tensorboard: bool = False,
         tensorboard_log_dir=None,
         metrics_for_tensorboard=[],
@@ -98,8 +161,6 @@ class LiteTrainer(LightningLite):
     ) -> dict:
         """
         Trains any class that implements the flair.nn.Model interface.
-        :param model: The model that you want to train. The model should inherit from flair.nn.Model  # noqa: E501
-        :param corpus: The dataset used to train the model, should be of type Corpus
         :param base_path: Main path to which all output during training is logged and models are saved  # noqa: E501
         :param learning_rate: Initial learning rate (or max, if scheduler is OneCycleLR)  # noqa: E501
         :param mini_batch_size: Size of mini-batches during training
@@ -145,11 +206,16 @@ class LiteTrainer(LightningLite):
         :param kwargs: Other arguments for the Optimizer
         :return:
         """
-
-        flair.device = self.device
-        self.model: Union[LightningLite._LiteModule, Model] = model
-        self.corpus: Corpus = corpus
-
+        # init device and decoder # changed
+        flair.device = self.device 
+        self.decoder = torch.nn.Linear(14, len(self.label_dictionary), device=self.device)
+        torch.nn.init.xavier_uniform_(self.decoder.weight)
+        
+        # init dropouts # changed
+        self.dropout: torch.nn.Dropout = torch.nn.Dropout(0.0)
+        self.locked_dropout = flair.nn.LockedDropout(0.0)
+        self.word_dropout = flair.nn.WordDropout(0.0)
+        
         # create a model card for this model with Flair and PyTorch version
         model_card: Dict[str, Any] = {
             "flair_version": flair.__version__,
@@ -164,11 +230,11 @@ class LiteTrainer(LightningLite):
         except ImportError:
             pass
 
-        # remember all parameters used in run() call
+        # remember all parameters used in train() call        
         local_variables = locals()
         training_parameters = {}
         for parameter in signature(self.run).parameters:
-            if parameter != 'args':
+            if parameter != 'args': # changed
                 training_parameters[parameter] = local_variables[parameter]
         model_card["training_parameters"] = training_parameters
 
@@ -190,6 +256,16 @@ class LiteTrainer(LightningLite):
                 log_line(log)
                 use_tensorboard = False
                 pass
+
+#         if use_amp:
+#             if sys.version_info < (3, 0):
+#                 raise RuntimeError("Apex currently only supports Python 3. Aborting.")
+#             if amp is None:
+#                 raise RuntimeError(
+#                     "Failed to import apex. Please install apex from "
+#                     "https://www.github.com/nvidia/apex "
+#                     "to enable mixed-precision training."
+#                 )
 
         if not eval_batch_size:
             eval_batch_size = mini_batch_size
@@ -244,13 +320,18 @@ class LiteTrainer(LightningLite):
 
         if use_swa:
             import torchcontrib
+
             optimizer = torchcontrib.optim.SWA(optimizer, swa_start=10, swa_freq=5, swa_lr=learning_rate)
 
         # from here on, use list of learning rates
         current_learning_rate: List = [group["lr"] for group in optimizer.param_groups]
 
+#         if use_amp:
+#             self.model, optimizer = amp.initialize(self.model, optimizer, opt_level=amp_opt_level)
+
+        self.model, optimizer = self.setup(self.model, optimizer) # changed
+
         optimizer = cast(torch.optim.Optimizer, optimizer)
-        self.model, optimizer = self.setup(self.model, optimizer) # metallo
 
         # load existing optimizer state dictionary if it exists
         if optimizer_state_dict:
@@ -372,7 +453,7 @@ class LiteTrainer(LightningLite):
 
             momentum = [group["momentum"] if "momentum" in group else 0 for group in optimizer.param_groups]
 
-            for epoch in range(epoch + 1, max_epochs + 1):
+            for epoch in range(initial_epoch + 1, max_epochs + 1): # changed
                 log_line(log)
 
                 # update epoch in model card
@@ -432,10 +513,15 @@ class LiteTrainer(LightningLite):
                     num_workers=0 if num_workers is None else num_workers,
                     sampler=sampler,
                 )
-                
-                batch_loader = self.setup_dataloaders(batch_loader) # metallo
+                batch_loader = self.setup_dataloaders(batch_loader) # changed
 
                 self.model.train()
+                
+                # reset variables
+#                 hidden = self.model.init_hidden(mini_batch_size)
+                
+                # not really sure what this does
+                ntokens = len(self.label_dictionary)
 
                 train_loss: float = 0
 
@@ -464,15 +550,54 @@ class LiteTrainer(LightningLite):
                     for batch_step in batch_steps:
 
                         # forward pass
-                        loss = model.forward_loss(batch_step)
-#                         loss = self.model(batch_step) # metallo
+                        loss = self.model_original.forward_loss(batch_step) # work in progress // to be replaced
+
+                        # make a forward pass to produce embedded data points and labels
+#                         embedded_data_points, labels = self.model(batch_step)
+                        # Returns the tuple (embeddings, labels) if return_label_candidates = False,
+                        # where scores are a tensor of logits produced by the decoder and labels
+                        # are the string labels for each data point.
+
+                        # no loss can be calculated if there are no labels
+#                         if not any(labels):
+#                             return torch.tensor(0.0, requires_grad=True, device=self.device), 1
+                        
+                        # use dropout
+#                         embedded_data_points = embedded_data_points.unsqueeze(1)
+#                         embedded_data_points = self.dropout(embedded_data_points)
+#                         embedded_data_points = self.locked_dropout(embedded_data_points)
+#                         embedded_data_points = self.word_dropout(embedded_data_points)
+#                         embedded_data_points = embedded_data_points.squeeze(1)
+
+                        # push embedded_data_points through decoder to get the scores
+#                         labels = torch.tensor(
+#                                         [
+#                                             self.label_dictionary.get_idx_for_item(label[0])
+#                                             if len(label) > 0
+#                                             else self.label_dictionary.get_idx_for_item("O")
+#                                             for label in labels
+#                                         ],
+#                                         dtype=torch.long,
+#                                         device=self.device,
+#                                     )
+        
+#                         scores = self.decoder(embedded_data_points)
+#                         scores_flat = embedded_data_points.view(embedded_data_points.size(0),-1)
+
+#                         # calculate the loss
+#                         loss = self.loss_function(scores, labels), len(labels)
 
                         if isinstance(loss, tuple):
                             average_over += loss[1]
                             loss = loss[0]
 
                         # Backward
-                        self.backward(loss) # metallo
+#                         if use_amp:
+#                             with amp.scale_loss(loss, optimizer) as scaled_loss:
+#                                 scaled_loss.backward()
+#                         else:
+#                             loss.backward()
+                        self.backward(loss) # changed
                         train_loss += loss.item()
 
                         # identify dynamic embeddings (always deleted) on first sentence
@@ -529,7 +654,7 @@ class LiteTrainer(LightningLite):
                 if save_model_each_k_epochs > 0 and epoch % save_model_each_k_epochs == 0:
                     log.info("saving model of current epoch")
                     model_name = "model_epoch_" + str(epoch) + ".pt"
-                    self.model.save(base_path / model_name, checkpoint=save_optimizer_state)
+                    self.model.module.save(base_path / model_name, checkpoint=save_optimizer_state) # changed
 
                 log_line(log)
                 log.info(f"EPOCH {epoch} done: loss {train_loss:.4f} - lr {lr_info}")
@@ -541,9 +666,9 @@ class LiteTrainer(LightningLite):
                 result_line: str = ""
 
                 if log_train:
-                    train_eval_result = self.model.evaluate(
+                    train_eval_result = self.model_original.evaluate( # work in progress, to be replaced
                         self.corpus.train,
-                        gold_label_type=self.model.label_type,
+                        gold_label_type=self.model_original.label_type, # work in progress, to be replaced
                         mini_batch_size=eval_batch_size,
                         num_workers=num_workers,
                         embedding_storage_mode=embeddings_storage_mode,
@@ -557,9 +682,9 @@ class LiteTrainer(LightningLite):
                     store_embeddings(self.corpus.train, embeddings_storage_mode, dynamic_embeddings)
 
                 if log_train_part:
-                    train_part_eval_result = self.model.evaluate(
+                    train_part_eval_result = self.model_original.evaluate( # work in progress, to be replaced
                         train_part,
-                        gold_label_type=self.model.label_type,
+                        gold_label_type=self.model_original.label_type, # work in progress, to be replaced
                         mini_batch_size=eval_batch_size,
                         num_workers=num_workers,
                         embedding_storage_mode=embeddings_storage_mode,
@@ -585,9 +710,9 @@ class LiteTrainer(LightningLite):
 
                 if log_dev:
                     assert self.corpus.dev
-                    dev_eval_result = self.model.evaluate(
+                    dev_eval_result = self.model_original.evaluate( # work in progress, to be replaced
                         self.corpus.dev,
-                        gold_label_type=self.model.label_type,
+                        gold_label_type=self.model_original.label_type, # work in progress, to be replaced
                         mini_batch_size=eval_batch_size,
                         num_workers=num_workers,
                         out_path=base_path / "dev.tsv",
@@ -628,9 +753,9 @@ class LiteTrainer(LightningLite):
 
                 if log_test:
                     assert self.corpus.test
-                    test_eval_result = self.model.evaluate(
+                    test_eval_result = self.model_original.evaluate( # work in progress, to be replaced
                         self.corpus.test,
-                        gold_label_type=self.model.label_type,
+                        gold_label_type=self.model_original.label_type,
                         mini_batch_size=eval_batch_size,
                         num_workers=num_workers,
                         out_path=base_path / "test.tsv",
@@ -751,7 +876,7 @@ class LiteTrainer(LightningLite):
 
                 # if checkpoint is enabled, save model at each epoch
                 if checkpoint and not param_selection_mode:
-                    self.model.save(base_path / "checkpoint.pt", checkpoint=True)
+                    self.model.module.save(base_path / "checkpoint.pt", checkpoint=True) # changed
 
                 # Check whether to save best model
                 if (
@@ -761,12 +886,12 @@ class LiteTrainer(LightningLite):
                     and not use_final_model_for_eval
                 ):
                     log.info("saving best model")
-                    self.model.save(base_path / "best-model.pt", checkpoint=save_optimizer_state)
+                    self.model.module.save(base_path / "best-model.pt", checkpoint=save_optimizer_state) # changed
 
                     if anneal_with_prestarts:
                         current_state_dict = self.model.state_dict()
                         self.model.load_state_dict(last_epoch_model_state_dict)
-                        self.model.save(base_path / "pre-best-model.pt")
+                        self.model.module.save(base_path / "pre-best-model.pt") # changed
                         self.model.load_state_dict(current_state_dict)
 
             if use_swa:
@@ -776,7 +901,7 @@ class LiteTrainer(LightningLite):
 
             # if we do not use dev data for model selection, save final model
             if save_final_model and not param_selection_mode:
-                self.model.save(base_path / "final-model.pt", checkpoint=save_optimizer_state)
+                self.model.module.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
 
         except KeyboardInterrupt:
             log_line(log)
@@ -784,7 +909,7 @@ class LiteTrainer(LightningLite):
 
             if not param_selection_mode:
                 log.info("Saving model ...")
-                self.model.save(base_path / "final-model.pt", checkpoint=save_optimizer_state)
+                self.model.module.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
                 log.info("Done.")
         except Exception:
             if create_file_logs:
@@ -822,7 +947,7 @@ class LiteTrainer(LightningLite):
 
     def resume(
         self,
-        model: flair.nn.Model,
+        model: Model,
         **trainer_args,
     ):
 
@@ -830,6 +955,7 @@ class LiteTrainer(LightningLite):
         self.model = model
         # recover all arguments that were used to train this model
         args_used_to_train_model = model.model_card["training_parameters"]
+
         # you can overwrite params with your own
         for param in trainer_args:
             args_used_to_train_model[param] = trainer_args[param]
@@ -843,22 +969,8 @@ class LiteTrainer(LightningLite):
         del args_used_to_train_model["kwargs"]
 
         # resume training with these parameters
-        self.run(**args_used_to_train_model, **kwargs)
+        self.train(**args_used_to_train_model, **kwargs)
 
-    @staticmethod
-    def check_for_and_delete_previous_best_models(base_path):
-        all_best_model_names = [filename for filename in os.listdir(base_path) if filename.startswith("best-model")]
-        if len(all_best_model_names) != 0:
-            warnings.warn(
-                "There should be no best model saved at epoch 1 except there "
-                "is a model from previous trainings"
-                " in your training folder. All previous best models will be deleted."
-            )
-        for single_model in all_best_model_names:
-            previous_best_path = os.path.join(base_path, single_model)
-            if os.path.exists(previous_best_path):
-                os.remove(previous_best_path)
-        
     def fine_tune(
         self,
         base_path: Union[Path, str],
@@ -873,7 +985,7 @@ class LiteTrainer(LightningLite):
         **trainer_args,
     ):
 
-        return self.run(
+        return self.train(
             base_path=base_path,
             learning_rate=learning_rate,
             max_epochs=max_epochs,
@@ -908,9 +1020,9 @@ class LiteTrainer(LightningLite):
             log.info("Testing using last state of model ...")
 
         assert self.corpus.test
-        test_results = self.model.evaluate(
+        test_results = self.model_original.evaluate( # work in progress, to be replaced
             self.corpus.test,
-            gold_label_type=self.model.label_type,
+            gold_label_type=self.model_original.label_type, # work in progress, to be replaced
             mini_batch_size=eval_mini_batch_size,
             num_workers=num_workers,
             out_path=base_path / "test.tsv",
@@ -929,9 +1041,9 @@ class LiteTrainer(LightningLite):
             for subcorpus in self.corpus.corpora:
                 log_line(log)
                 if subcorpus.test:
-                    subcorpus_results = self.model.evaluate(
+                    subcorpus_results = self.model_original.evaluate( # work in progress, to be replaced
                         subcorpus.test,
-                        gold_label_type=self.model.label_type,
+                        gold_label_type=self.model_original.label_type, # work in progress, to be replaced
                         mini_batch_size=eval_mini_batch_size,
                         num_workers=num_workers,
                         out_path=base_path / f"{subcorpus.name}-test.tsv",
@@ -979,22 +1091,17 @@ class LiteTrainer(LightningLite):
         scheduler = ExpAnnealLR(optimizer, end_learning_rate, iterations)
 
         model_state = self.model.state_dict()
-        
-        self.model, optimizer = self.setup(self.model, optimizer) # metallo
         self.model.train()
 
         step = 0
         while step < iterations:
             batch_loader = DataLoader(train_data, batch_size=mini_batch_size, shuffle=True)
-            batch_loader = self.setup_dataloaders(batch_loader) # metallo
-            
+            batch_loader = self.setup_dataloaders(batch_loader) # added
             for batch in batch_loader:
                 step += 1
 
                 # forward pass
-#                 loss = self.model.forward_loss(batch)
-                loss = self.model(batch)
-
+                loss = self.model.forward_loss(batch)
                 if isinstance(loss, tuple):
                     loss = loss[0]
 
@@ -1031,6 +1138,7 @@ class LiteTrainer(LightningLite):
 
             self.model.load_state_dict(model_state)
 #             self.model.to(flair.device)
+            self.model.to(self.device) # changed
 
         log_line(log)
         log.info(f"learning rate finder finished - plot {learning_rate_tsv}")

@@ -46,3 +46,5 @@ dependencies:
     - more-itertools
     - wikipedia-api
     - pptree
+    - datasets
+    - seqeval

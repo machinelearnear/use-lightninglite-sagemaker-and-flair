@@ -4,18 +4,15 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
 
 import torch
 from transformers import HfArgumentParser
-
-sys.path.append('code')
 
 import flair
 from flair import set_seed
 from flair.embeddings import TransformerWordEmbeddings
 from flair.models import SequenceTagger
-from custom_trainer import LiteTrainer
+from flair.trainers import ModelTrainer
 
 logger = logging.getLogger("flair")
 logger.setLevel(level="INFO")
@@ -45,18 +42,10 @@ class TrainingArguments:
     )
     learning_rate: float = field(default=5e-05, metadata={"help": "Learning rate"})
     seed: int = field(default=42, metadata={"help": "Seed used for reproducible fine-tuning results."})
-    device: str = field(default="cuda", metadata={"help": "CUDA device string."})
+    device: str = field(default="cuda:0", metadata={"help": "CUDA device string."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for optimizer."})
     embeddings_storage_mode: str = field(default="none", metadata={"help": "Defines embedding storage method."})
-    accelerator: Optional[str] = field(default=None, metadata={"help": "Choose the hardware to run on e.g. 'gpu'."})
-    strategy: Optional[str] = field(
-        default=None, 
-        metadata={"help": "Strategy for how to run across multiple devices e.g. 'ddp', 'deepspeed'."})
-    devices: Optional[int] = field(
-        default=None, 
-        metadata={"help": "Number of devices to train on (int), which GPUs to train on (list or str)"})
-    num_nodes: Optional[int] = field(default=1, metadata={"help": "Number of GPU nodes for distributed training."})
-    precision: Optional[int] = field(default=32, metadata={"help": "Choose training precision to use."})         
+
 
 @dataclass
 class FlertArguments:
@@ -145,16 +134,10 @@ def main():
         use_rnn=False,
         reproject_embeddings=False,
     )
-    
-    trainer = LiteTrainer(
-        accelerator=training_args.accelerator,
-        strategy=training_args.strategy,
-        devices=training_args.devices,
-        num_nodes=training_args.num_nodes,
-        precision=training_args.precision,
-    )
 
-    trainer.run(tagger, corpus,
+    trainer = ModelTrainer(tagger, corpus)
+
+    trainer.fine_tune(
         data_args.output_dir,
         learning_rate=training_args.learning_rate,
         mini_batch_size=training_args.batch_size,

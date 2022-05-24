@@ -1,4 +1,3 @@
-gradio
 boto3
 awscli
 sagemaker
@@ -34,3 +33,5 @@ conllu
 more-itertools
 wikipedia-api
 pptree
+datasets
+seqeval
