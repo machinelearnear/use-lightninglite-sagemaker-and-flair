@@ -484,10 +484,10 @@ class LiteTrainer(LightningLite):
                 ):
                     if anneal_with_restarts:
                         log.info("resetting to best model")
-                        self.model.load_state_dict(self.model.load(base_path / "best-model.pt").state_dict())
+                        self.model_original.load(self.model_original.load(base_path / "best-model.pt").state_dict())
                     if anneal_with_prestarts:
                         log.info("resetting to pre-best model")
-                        self.model.load_state_dict(self.model.load(base_path / "pre-best-model.pt").state_dict())
+                        self.model_original.load(self.model_original.load(base_path / "pre-best-model.pt").state_dict())
 
                 previous_learning_rate = current_learning_rate
                 if use_tensorboard:
@@ -654,7 +654,7 @@ class LiteTrainer(LightningLite):
                 if save_model_each_k_epochs > 0 and epoch % save_model_each_k_epochs == 0:
                     log.info("saving model of current epoch")
                     model_name = "model_epoch_" + str(epoch) + ".pt"
-                    self.model.module.save(base_path / model_name, checkpoint=save_optimizer_state) # changed
+                    self.model_original.save(base_path / model_name, checkpoint=save_optimizer_state) # changed
 
                 log_line(log)
                 log.info(f"EPOCH {epoch} done: loss {train_loss:.4f} - lr {lr_info}")
@@ -876,7 +876,7 @@ class LiteTrainer(LightningLite):
 
                 # if checkpoint is enabled, save model at each epoch
                 if checkpoint and not param_selection_mode:
-                    self.model.module.save(base_path / "checkpoint.pt", checkpoint=True) # changed
+                    self.model_original.save(base_path / "checkpoint.pt", checkpoint=True) # changed
 
                 # Check whether to save best model
                 if (
@@ -886,13 +886,13 @@ class LiteTrainer(LightningLite):
                     and not use_final_model_for_eval
                 ):
                     log.info("saving best model")
-                    self.model.module.save(base_path / "best-model.pt", checkpoint=save_optimizer_state) # changed
+                    self.model_original.save(base_path / "best-model.pt", checkpoint=save_optimizer_state) # changed
 
                     if anneal_with_prestarts:
                         current_state_dict = self.model.state_dict()
-                        self.model.load_state_dict(last_epoch_model_state_dict)
-                        self.model.module.save(base_path / "pre-best-model.pt") # changed
-                        self.model.load_state_dict(current_state_dict)
+                        self.model_original.load_state_dict(last_epoch_model_state_dict)
+                        self.model_original.save(base_path / "pre-best-model.pt") # changed
+                        self.model_original.load_state_dict(current_state_dict)
 
             if use_swa:
                 import torchcontrib
@@ -901,7 +901,7 @@ class LiteTrainer(LightningLite):
 
             # if we do not use dev data for model selection, save final model
             if save_final_model and not param_selection_mode:
-                self.model.module.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
+                self.model_original.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
 
         except KeyboardInterrupt:
             log_line(log)
@@ -909,7 +909,7 @@ class LiteTrainer(LightningLite):
 
             if not param_selection_mode:
                 log.info("Saving model ...")
-                self.model.module.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
+                self.model_original.save(base_path / "final-model.pt", checkpoint=save_optimizer_state) # changed
                 log.info("Done.")
         except Exception:
             if create_file_logs:
@@ -1015,7 +1015,7 @@ class LiteTrainer(LightningLite):
         self.model.eval()
 
         if (base_path / "best-model.pt").exists():
-            self.model.load_state_dict(self.model.load(base_path / "best-model.pt").state_dict())
+            self.model_original.load(self.load(base_path / "best-model.pt").state_dict())
         else:
             log.info("Testing using last state of model ...")
 
